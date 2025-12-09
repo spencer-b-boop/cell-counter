@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Neutrophil Cell Counter</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      background: #111;
+      color: #eee;
+      margin: 0;
+      padding: 20px;
+    }
+    h1 {
+      margin-top: 0;
+      color: #7df9ff;
+      text-shadow: 0 0 10px #00ffff55;
+    }
+    .container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 20px;
+      align-items: flex-start;
+    }
+    #controls {
+      flex: 0 0 260px;
+      padding: 15px;
+      border-radius: 12px;
+      background: #1c1c1c;
+      box-shadow: 0 0 20px #00ffff22;
+    }
+    #controls label {
+      display: block;
+      margin-top: 10px;
+      font-size: 0.9rem;
+    }
+    input[type="file"] {
+      margin-top: 6px;
+    }
+    input[type="range"] {
+      width: 100%;
+    }
+    #status {
+      margin-top: 10px;
+      font-size: 0.9rem;
+      color: #aaa;
+    }
+    #count {
+      font-size: 1.3rem;
+      margin-top: 12px;
+      color: #7df9ff;
+    }
+    #canvas-wrapper {
+      flex: 1 1 600px;
+      max-width: 100%;
+      background: #000;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 0 25px #00ffff22;
+      position: relative;
+    }
+    canvas {
+      max-width: 100%;
+      height: auto;
+      display: block;
+    }
+    #note {
+      margin-top: 10px;
+      font-size: 0.8rem;
+      color: #888;
+    }
+  </style>
+</head>
+<body>
+  <h1>Neutrophil Cell Counter</h1>
+  <div class="container">
+    <div id="controls">
+      <label>
+        Upload fluorescence image (neutrophils):
+        <input type="file" id="file-input" accept="image/*" />
+      </label>
+
+      <label>
+        Intensity threshold (green channel):
+        <input type="range" id="threshold" min="10" max="150" value="35" />
+        <span id="threshold-value">35</span>
+      </label>
+
+      <label>
+        Min cell area (pixels):
+        <input type="number" id="min-area" value="50" min="1" step="10" />
+      </label>
+
+      <label>
+        Max cell area (pixels):
+        <input type="number" id="max-area" value="2000" min="10" step="10" />
+      </label>
+
+      <button id="analyze-btn">Analyze Image</button>
+
+      <div id="count">Cells: —</div>
+      <div id="status">Upload an image to begin.</div>
+      <div id="note">
+        Tip: if it over/under-counts, adjust the threshold and area limits and click
+        <strong>Analyze Image</strong> again.
+      </div>
+    </div>
+
+    <div id="canvas-wrapper">
+      <canvas id="canvas"></canvas>
+    </div>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById("file-input");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    const analyzeBtn = document.getElementById("analyze-btn");
+    const statusEl = document.getElementById("status");
+    const countEl = document.getElementById("count");
+    const thrSlider = document.getElementById("threshold");
+    const thrValue = document.getElementById("threshold-value");
+    const minAreaInput = document.getElementById("min-area");
+    const maxAreaInput = document.getElementById("max-area");
+
+    let imageLoaded = false;
+    let imageDataCache = null;
+
+    thrSlider.addEventListener("input", () => {
+      thrValue.textContent = thrSlider.value;
+    });
+
+    fileInput.addEventListener("change", (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = function (ev) {
+        const img = new Image();
+        img.onload = function () {
+          canvas.width = img.width;
+          canvas.height = img.height;
+          ctx.drawImage(img, 0, 0);
+          imageLoaded = true;
+          imageDataCache = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          statusEl.textContent = "Image loaded. Adjust settings and click Analyze.";
+          countEl.textContent = "Cells: —";
+        };
+        img.src = ev.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+
+    analyzeBtn.addEventListener("click", () => {
+      if (!imageLoaded || !imageDataCache) {
+        statusEl.textContent = "Please upload an image first.";
+        return;
+      }
+      const threshold = parseInt(thrSlider.value, 10);
+      const minArea = parseInt(minAreaInput.value, 10);
+      const maxArea = parseInt(maxAreaInput.value, 10);
+
+      statusEl.textContent = "Analyzing...";
+      setTimeout(() => {
+        const cellCount = analyzeImage(imageDataCache, threshold, minArea, maxArea);
+        countEl.textContent = "Cells: " + cellCount;
+        statusEl.textContent = "Done.";
+      }, 10);
+    });
+
+    function analyzeImage(imageData, threshold, minArea, maxArea) {
+      const { width, height, data } = imageData;
+
+      // Copy original image back to canvas
+      ctx.putImageData(imageData, 0, 0);
+
+      // Build mask of bright green pixels
+      const mask = new Uint8Array(width * height);
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const idx = (y * width + x) * 4;
+          const g = data[idx + 1]; // green channel
+          if (g > threshold) {
+            mask[y * width + x] = 1;
+          }
+        }
+      }
+
+      // Connected-components labeling (4-neighbourhood)
+      const labels = new Int32Array(width * height).fill(-1);
+      const dirs = [
+        [1, 0],
+        [-1, 0],
+        [0, 1],
+        [0, -1],
+      ];
+
+      const centers = [];
+      let label = 0;
+      const queue = [];
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const idx = y * width + x;
+          if (mask[idx] && labels[idx] === -1) {
+            queue.length = 0;
+            queue.push(idx);
+            labels[idx] = label;
+
+            let sumX = 0;
+            let sumY = 0;
+            let count = 0;
+
+            while (queue.length > 0) {
+              const cur = queue.pop();
+              const cy = Math.floor(cur / width);
+              const cx = cur % width;
+
+              sumX += cx;
+              sumY += cy;
+              count++;
+
+              for (const [dy, dx] of dirs) {
+                const ny = cy + dy;
+                const nx = cx + dx;
+                if (
+                  ny >= 0 &&
+                  ny < height &&
+                  nx >= 0 &&
+                  nx < width
+                ) {
+                  const nIdx = ny * width + nx;
+                  if (mask[nIdx] && labels[nIdx] === -1) {
+                    labels[nIdx] = label;
+                    queue.push(nIdx);
+                  }
+                }
+              }
+            }
+
+            if (count >= minArea && count <= maxArea) {
+              const cx = sumX / count;
+              const cy = sumY / count;
+              centers.push({ x: cx, y: cy });
+            }
+
+            label++;
+          }
+        }
+      }
+
+      // Draw neon dots on top of the image
+      ctx.save();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#00ffff"; // neon cyan
+
+      const radius = 8;
+      centers.forEach((c) => {
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, radius, 0, Math.PI * 2);
+        ctx.stroke();
+      });
+
+      ctx.restore();
+
+      return centers.length;
+    }
+  </script>
+</body>
+</html>
